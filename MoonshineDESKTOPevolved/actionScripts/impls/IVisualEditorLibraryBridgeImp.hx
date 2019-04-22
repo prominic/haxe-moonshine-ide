@@ -1,0 +1,164 @@
+////////////////////////////////////////////////////////////////////////////////
+// Copyright 2016 Prominic.NET, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License
+//
+// Author: Prominic.NET, Inc.
+// No warranty of merchantability or fitness of any kind.
+// Use this software at your own risk.
+////////////////////////////////////////////////////////////////////////////////
+package actionScripts.impls;
+
+import haxe.Constraints.Function;
+import mx.collections.ArrayCollection;
+import mx.events.CollectionEvent;
+import mx.events.CollectionEventKind;
+import actionScripts.events.GlobalEventDispatcher;
+import actionScripts.events.OpenFileEvent;
+import actionScripts.events.TreeMenuItemEvent;
+import actionScripts.factory.FileLocation;
+import actionScripts.locator.IDEModel;
+import actionScripts.plugin.actionscript.as3project.vo.AS3ProjectVO;
+import actionScripts.plugins.ui.editor.VisualEditorViewer;
+import actionScripts.utils.UtilsCore;
+import actionScripts.valueObjects.FileWrapper;
+import actionScripts.valueObjects.ProjectVO;
+import actionScripts.valueObjects.ResourceVO;
+import view.VisualEditor;
+import view.interfaces.IVisualEditorLibraryBridge;
+
+class IVisualEditorLibraryBridgeImp implements IVisualEditorLibraryBridge {
+
+	public var visualEditorProject:AS3ProjectVO;
+
+	private var dispatcher:GlobalEventDispatcher = GlobalEventDispatcher.getInstance();
+	private var model:IDEModel = IDEModel.getInstance();
+	private var updateHandler:Function;
+
+	public function getXhtmlFileUpdates(updateHandler:Function = null):Void {
+		this.updateHandler = cast updateHandler;
+		if (!AS3.as(visualEditorProject.filesList, Bool)) {
+			visualEditorProject.filesList = new ArrayCollection();
+			UtilsCore.parseFilesList(visualEditorProject.filesList, AS3.as(visualEditorProject, ProjectVO), ['xhtml'], true);// to be use in includes files list in primefaces
+			dispatcher.addEventListener(TreeMenuItemEvent.NEW_FILE_CREATED, onNewFileAdded, false, 0, true);
+			dispatcher.addEventListener(TreeMenuItemEvent.FILE_DELETED, onFileRemoved, false, 0, true);
+			dispatcher.addEventListener(TreeMenuItemEvent.FILE_RENAMED, onFileRenamed, false, 0, true);
+
+			// remove footprint when project is removed
+			model.projects.addEventListener(CollectionEvent.COLLECTION_CHANGE, handleEditorChange, false, 0, true);
+		}
+
+		sendXHtmlUpdates();
+	}
+
+	public function openXhtmlFile(path:String):Void {
+		var tmpOpenFile:FileLocation = new FileLocation(visualEditorProject.sourceFolder.fileBridge.nativePath + visualEditorProject.projectFile.fileBridge.separator + path);
+		if (tmpOpenFile == null) {
+			return;
+		}
+
+		dispatcher.dispatchEvent(new OpenFileEvent(OpenFileEvent.OPEN_FILE, [tmpOpenFile]));
+	}
+
+	public function getVisualEditorComponent():VisualEditor {
+		var editor:VisualEditorViewer = AS3.as(model.activeEditor, VisualEditorViewer);
+		if (editor != null) {
+			return editor.editorView.visualEditor;
+		}
+
+		return null;
+	}
+
+	public function getCustomTooltipFunction():Function {
+		return UtilsCore.createCustomToolTip;
+	}
+
+	public function getPositionTooltipFunction():Function {
+		return UtilsCore.positionTip;
+	}
+
+	public function getRelativeFilePath():String {
+		var editor:VisualEditorViewer = AS3.as(model.activeEditor, VisualEditorViewer);
+		if (editor == null) {
+			return '';
+		}
+
+		return Std.string(editor.currentFile.fileBridge.getRelativePath(visualEditorProject.sourceFolder, true));
+	}
+
+	private function onNewFileAdded(event:TreeMenuItemEvent):Void {
+		// add resource only relative to the project
+		if (event.data.projectReference.path == visualEditorProject.projectFolder.nativePath) {
+			// make sure we use existing object only and not create new
+			var newFileWrapper:FileWrapper = UtilsCore.findFileWrapperAgainstFileLocation(event.data, AS3.as(event.extra, FileLocation));
+			if (newFileWrapper != null) {
+				visualEditorProject.filesList.addItem(new ResourceVO((AS3.as(event.extra, FileLocation)).name, newFileWrapper));
+				sendXHtmlUpdates();
+			}
+		}
+	}
+
+	private function onFileRemoved(event:TreeMenuItemEvent):Void {
+		// remove resource only relative to the project
+		if (event.data.projectReference.path == visualEditorProject.projectFolder.nativePath) {
+			var pathSeparator:String = Std.string(event.data.file.fileBridge.separator);
+			var i:Int = 0;
+			while (i < visualEditorProject.filesList.length) {
+				// direct == path check or
+				// path check if the xhtml file is children of deleted file/folder
+				if (event.data.file.fileBridge.nativePath == Reflect.getProperty(visualEditorProject.filesList, Std.string(i)).sourceWrapper.file.fileBridge.nativePath) {
+					visualEditorProject.filesList.removeItemAt(i);
+					break;
+				} else if (Reflect.getProperty(visualEditorProject.filesList, Std.string(i)).sourceWrapper.file.fileBridge.nativePath.indexOf(event.data.file.fileBridge.nativePath + pathSeparator) != -1) {
+					visualEditorProject.filesList.removeItemAt(i);
+					i--;
+				}
+				i++;
+			}
+
+			sendXHtmlUpdates();
+		}
+	}
+
+	private function onFileRenamed(event:TreeMenuItemEvent):Void {
+		// remove resource only relative to the project
+		if (event.data.projectReference.path == visualEditorProject.projectFolder.nativePath) {
+			for (i in as3hx.Compat.each(visualEditorProject.filesList)) {
+				if (event.data.file.fileBridge.nativePath == Reflect.field(Reflect.field(Reflect.field(Reflect.field(i, 'sourceWrapper'), 'file'), 'fileBridge'), 'nativePath')) {
+					Reflect.setField(i, 'name', event.data.name);
+					Reflect.setField(i, 'resourcePath', event.data.nativePath);
+					break;
+				}
+			}
+			sendXHtmlUpdates();
+		}
+	}
+
+	private function sendXHtmlUpdates():Void {
+		this.updateHandler(visualEditorProject.filesList);
+	}
+
+	private function handleEditorChange(event:CollectionEvent):Void {
+		if (event.kind == CollectionEventKind.REMOVE && (AS3ProjectVO(Reflect.getProperty(event.items, Std.string(0))).folderPath == visualEditorProject.folderPath)) {
+			model.projects.removeEventListener(CollectionEvent.COLLECTION_CHANGE, handleEditorChange);
+			dispatcher.removeEventListener(TreeMenuItemEvent.NEW_FILE_CREATED, onNewFileAdded);
+			dispatcher.removeEventListener(TreeMenuItemEvent.FILE_DELETED, onFileRemoved);
+			dispatcher.removeEventListener(TreeMenuItemEvent.FILE_RENAMED, onFileRenamed);
+
+			this.updateHandler = null;
+		}
+	}
+
+	public function new() {}
+
+}
